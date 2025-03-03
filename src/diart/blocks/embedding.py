@@ -6,18 +6,29 @@ from einops import rearrange
 from .. import functional as F
 from ..features import TemporalFeatures, TemporalFeatureFormatter
 from ..models import EmbeddingModel
+import nemo.collections.asr as nemo_asr
+# from espnet2.bin.spk_inference import Speech2Embedding
 
 
 class SpeakerEmbedding:
-    def __init__(self, model: EmbeddingModel, device: Optional[torch.device] = None):
-        self.model = model
-        self.model.eval()
-        self.device = device
-        if self.device is None:
-            self.device = torch.device("cpu")
-        self.model.to(self.device)
-        self.waveform_formatter = TemporalFeatureFormatter()
-        self.weights_formatter = TemporalFeatureFormatter()
+    def __init__(self, model: EmbeddingModel, device: Optional[torch.device] = None, emb_model = None):
+        self.emb_model = emb_model
+        if emb_model == "spkrnet":
+            self.model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(model_name="speakerverification_speakernet")
+            self.device = device
+            if self.device is None:
+                self.device = torch.device("cpu")
+            self.waveform_formatter = TemporalFeatureFormatter()
+            self.weights_formatter = TemporalFeatureFormatter()
+        else: 
+            self.model = model
+            self.model.eval()
+            self.device = device
+            if self.device is None:
+                self.device = torch.device("cpu")
+            self.model.to(self.device)
+            self.waveform_formatter = TemporalFeatureFormatter()
+            self.weights_formatter = TemporalFeatureFormatter()
 
     @staticmethod
     def from_pretrained(
@@ -51,7 +62,7 @@ class SpeakerEmbedding:
         with torch.no_grad():
             inputs = self.waveform_formatter.cast(waveform).to(self.device)
             inputs = rearrange(inputs, "batch sample channel -> batch channel sample")
-            if weights is not None:
+            if weights is not None and not self.emb_model:
                 weights = self.weights_formatter.cast(weights).to(self.device)
                 batch_size, _, num_speakers = weights.shape
                 inputs = inputs.repeat(1, num_speakers, 1)
@@ -63,6 +74,23 @@ class SpeakerEmbedding:
                     batch=batch_size,
                     spk=num_speakers,
                 )
+            elif weights is not None and self.emb_model:
+                weights = self.weights_formatter.cast(weights).to(self.device)
+                batch_size, _, num_speakers = weights.shape
+                inputs = inputs.repeat(1, num_speakers, 1)
+                weights = rearrange(weights, "batch frame spk -> (batch spk) frame")
+                inputs = rearrange(inputs, "batch spk sample -> (batch spk) 1 sample")
+                output = []
+                inputs = inputs.squeeze(dim=1)
+                # print("Inputs shape: ", inputs.shape)
+                for i in inputs:
+                    # ind_input = i.squeeze()
+                    ind_output = self.model.get_embedding(i)
+                    output.append(ind_output)
+                # output = self.model.get_embedding(inputs)
+                output = torch.stack(output)
+                output = output.squeeze(dim=1)
+                return output.cpu()
             else:
                 output = self.model(inputs)
             return output.squeeze().cpu()
@@ -172,6 +200,40 @@ class OverlapAwareSpeakerEmbedding:
             model, gamma, beta, norm, normalize_weights, device
         )
 
+    def __call__(
+        self, waveform: TemporalFeatures, segmentation: TemporalFeatures
+    ) -> torch.Tensor:
+        return self.normalize(self.embedding(waveform, self.osp(segmentation)))
+    
+class SpkrNetSpeakerEmbedding:
+    def __init__(
+        self,
+        model: EmbeddingModel,
+        gamma: float = 3,
+        beta: float = 10,
+        norm: Union[float, torch.Tensor] = 1,
+        normalize_weights: bool = False,
+        device: Optional[torch.device] = None,
+    ):
+        self.embedding = SpeakerEmbedding(model, device, emb_model="spkrnet")
+        self.osp = OverlappedSpeechPenalty(gamma, beta, normalize_weights)
+        self.normalize = EmbeddingNormalization(norm)
+
+    @staticmethod
+    def from_pretrained(
+        model,
+        gamma: float = 3,
+        beta: float = 10,
+        norm: Union[float, torch.Tensor] = 1,
+        use_hf_token: Union[Text, bool, None] = True,
+        normalize_weights: bool = False,
+        device: Optional[torch.device] = None,
+    ):
+        model = EmbeddingModel.from_pretrained(model, use_hf_token)
+        return SpkrNetSpeakerEmbedding(
+            model, gamma, beta, norm, normalize_weights, device
+        )
+    
     def __call__(
         self, waveform: TemporalFeatures, segmentation: TemporalFeatures
     ) -> torch.Tensor:

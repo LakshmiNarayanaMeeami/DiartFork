@@ -12,7 +12,7 @@ from typing_extensions import Literal
 from . import base
 from .aggregation import DelayedAggregation
 from .clustering import OnlineSpeakerClustering
-from .embedding import OverlapAwareSpeakerEmbedding
+from .embedding import OverlapAwareSpeakerEmbedding, SpkrNetSpeakerEmbedding
 from .segmentation import SpeakerSegmentation
 from .utils import Binarize
 from .. import models as m
@@ -87,7 +87,7 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
 
 
 class SpeakerDiarization(base.Pipeline):
-    def __init__(self, config: SpeakerDiarizationConfig | None = None):
+    def __init__(self, config: SpeakerDiarizationConfig | None = None, emb_model = None):
         self._config = SpeakerDiarizationConfig() if config is None else config
 
         msg = f"Latency should be in the range [{self._config.step}, {self._config.duration}]"
@@ -96,14 +96,34 @@ class SpeakerDiarization(base.Pipeline):
         self.segmentation = SpeakerSegmentation(
             self._config.segmentation, self._config.device
         )
-        self.embedding = OverlapAwareSpeakerEmbedding(
-            self._config.embedding,
-            self._config.gamma,
-            self._config.beta,
-            norm=1,
-            normalize_weights=self._config.normalize_embedding_weights,
-            device=self._config.device,
-        )
+
+        # if emb_model == "espnet":
+        #     self.embedding = EpsnetSpeakerEmbedding(
+        #         self._config.embedding,
+        #         self._config.gamma,
+        #         self._config.beta,
+        #         norm=1,
+        #         normalize_weights=self._config.normalize_embedding_weights,
+        #         device=self._config.device,
+        #     )
+        if emb_model == "spkrnet":
+            self.embedding = SpkrNetSpeakerEmbedding(
+                self._config.embedding,
+                self._config.gamma,
+                self._config.beta,
+                norm=1,
+                normalize_weights=self._config.normalize_embedding_weights,
+                device=self._config.device,
+            )
+        else:
+            self.embedding = OverlapAwareSpeakerEmbedding(
+                self._config.embedding,
+                self._config.gamma,
+                self._config.beta,
+                norm=1,
+                normalize_weights=self._config.normalize_embedding_weights,
+                device=self._config.device,
+            )
         self.pred_aggregation = DelayedAggregation(
             self._config.step,
             self._config.latency,
