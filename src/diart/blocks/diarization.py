@@ -816,7 +816,7 @@ class SpeakerDiarization(base.Pipeline):
             agg_prediction = self.binarize(agg_prediction)
 
             # Label assignment 
-            if self.known_spkr_wavs is not None:
+            if self.known_spkr_wavs_folder is not None:
                 cnt_labels = agg_prediction.labels()
                 if len(cnt_labels) != 0 and agg_waveform.data.shape[0] != 8000:
                     agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data, clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
