@@ -433,12 +433,12 @@ from einops import rearrange
 from .. import functional as F
 from ..features import TemporalFeatures, TemporalFeatureFormatter
 from ..models import EmbeddingModel
-from espnet2.bin.spk_inference import Speech2Embedding
 
 class SpeakerEmbedding:
     def __init__(self, model: EmbeddingModel, device: Optional[torch.device] = None, espnet :  Optional[bool] = False):
         self.espnet = espnet
         if espnet:
+            from espnet2.bin.spk_inference import Speech2Embedding
             # config_path_joint_wavlm_ecapa = "/home/narayana/anaconda3/envs/spkr_diarize/lib/python3.10/site-packages/espnet_model_zoo/models--espnet--voxcelebs12_ecapa_wavlm_joint/snapshots/e50c506b4adce4de2cac862fa2bfa441712c5851/exp/spk_train_ecapa_Vox12_emb192_torchmelspec_subcentertopk_wavlm_jt11_raw_sp/config.yaml"
             config_path_joint_wavlm_ecapa = "/home/narayana/Projects/spkr_diarize/pretrained_models/ecapa_wavlm/config.yaml"
             model_path_joint_wavlm_ecapa = "/home/narayana/Projects/spkr_diarize/pretrained_models/ecapa_wavlm/8epoch.pth"
