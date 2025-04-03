@@ -509,6 +509,7 @@ from .segmentation import SpeakerSegmentation
 from .utils import Binarize
 from .. import models as m
 
+from scipy.spatial.distance import cosine
 
 class SpeakerDiarizationConfig(base.PipelineConfig):
     def __init__(
@@ -579,7 +580,29 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
 
 
 class SpeakerDiarization(base.Pipeline):
-    def __init__(self, config: SpeakerDiarizationConfig | None = None, espnet = False):
+    def __init__(self, config: SpeakerDiarizationConfig | None = None, espnet = False, known_spkr_wavs = None):
+        self.known_spkr_wavs_folder = known_spkr_wavs
+        if self.known_spkr_wavs_folder is not None:
+            import os
+            self.known_spkr_wavs = {}
+            from pyannote.audio import Model
+            model = Model.from_pretrained("pyannote/embedding", 
+                              use_auth_token="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")
+            from pyannote.audio import Inference
+            # DF the uri's and abs path
+            inference = Inference(model, window="whole")
+            abs_folder_path = os.path.abspath(self.known_spkr_wavs_folder)
+            for file in os.listdir(abs_folder_path):
+                if file.endswith(".wav"):
+                    abs_path = os.path.join(abs_folder_path, file)
+                    print("Loaded Audio : ", file)
+                    uri = str(file).split('.')[0]
+                    self.known_spkr_wavs[uri] = abs_path
+            self.known_spkr_embds = {}
+            # extract the embeddings
+            for name, file_path in self.known_spkr_wavs.items():
+                self.known_spkr_embds[name] = inference(file_path)
+
         self._config = SpeakerDiarizationConfig() if config is None else config
 
         msg = f"Latency should be in the range [{self._config.step}, {self._config.duration}]"
@@ -789,7 +812,16 @@ class SpeakerDiarization(base.Pipeline):
             # Aggregate buffer outputs for this time step
             agg_waveform = self.audio_aggregation(self.chunk_buffer)
             agg_prediction = self.pred_aggregation(self.pred_buffer)
+            clustered_op = agg_prediction.data.copy()
             agg_prediction = self.binarize(agg_prediction)
+
+            # Label assignment 
+            if self.known_spkr_wavs is not None:
+                cnt_labels = agg_prediction.labels()
+                if len(cnt_labels) != 0 and agg_waveform.data.shape[0] != 8000:
+                    agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data, clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
+                elif len(cnt_labels) != 0 and agg_waveform.data.shape[0] == 8000:
+                    agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data[293-clustered_op.shape[0]:,:], clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
 
             # Shift prediction timestamps if required
             if self.timestamp_shift != 0:
@@ -812,3 +844,145 @@ class SpeakerDiarization(base.Pipeline):
                 self.pred_buffer = self.pred_buffer[1:]
 
         return outputs
+    
+    # def labelling(self, windows_seg, seg_after_clustering, embeddings):
+    #     seg_after_clustering = seg_after_clustering.data > self.threshold
+    #     num_frames, num_embeddings = windows_seg.shape
+    #     _, num_output_speakers = seg_after_clustering.shape
+
+    #     # Find which output speakers are actually active
+    #     active_output_speakers = []
+    #     for spk in range(num_output_speakers):
+    #         if np.any(seg_after_clustering[:, spk]):
+    #             active_output_speakers.append(spk)
+
+    #     # For each active output speaker, compute correlation with original activity patterns
+    #     similarity_matrix = np.zeros((len(active_output_speakers), num_embeddings))
+
+    #     for i, output_spk in enumerate(active_output_speakers):
+    #         output_pattern = seg_after_clustering[:, output_spk]
+
+    #         for j in range(num_embeddings):
+    #             # Compute correlation between this output speaker's activity pattern
+    #             # and the original activity pattern for embedding j
+    #             activity_pattern_j = windows_seg[:, j]
+
+    #             # Calculate correlation
+    #             if np.std(output_pattern) > 0 and np.std(activity_pattern_j) > 0:
+    #                 corr = np.corrcoef(output_pattern, activity_pattern_j)[0, 1]
+    #                 similarity_matrix[i, j] = corr
+
+    #     # Use Hungarian algorithm for optimal assignment
+    #     # Note: We may have more output speakers than embeddings
+    #     row_ind, col_ind = linear_sum_assignment(-similarity_matrix[:, :num_embeddings])
+
+    #     # Create mapping from speaker label to embedding index
+    #     speaker_to_embedding = {}
+    #     for i, row in enumerate(row_ind):
+    #         output_spk = active_output_speakers[row]
+    #         embedding_idx = col_ind[i]
+    #         speaker_to_embedding[f"speaker{output_spk}"] = embedding_idx
+
+    #     return speaker_to_embedding
+
+    def match_and_identify_speakers(self,
+        embeddings: np.ndarray,             # Shape (num_embeddings, embedding_dim) (3, 512)
+        original_activity: np.ndarray,      # Shape (num_frames, num_embeddings) (293, 3)
+        clustered_output: np.ndarray,       # Shape (num_frames, max_speakers) e.g., (293, 20) Global
+        known_speaker_embeddings: dict,     # Dict mapping speaker names to embeddings -> values: ndarray
+        annotation: object = None           # Optional annotation object to update the label names
+            ):
+        
+        binarized_output = clustered_output > self._config.tau_active
+
+        num_frames, num_embeddings = original_activity.shape
+        _, num_output_speakers = binarized_output.shape
+
+
+        num_orig_frames = original_activity.shape[0]
+        num_cluster_frames = clustered_output.shape[0]
+
+
+        if num_orig_frames > num_cluster_frames:
+            pad_size = num_orig_frames - num_cluster_frames
+            clustered_output = np.pad(
+                clustered_output, 
+                ((0, pad_size), (0, 0)), 
+                'constant', 
+                constant_values=0
+            )
+        else:
+            # Truncate clustered_output
+            clustered_output = clustered_output[:num_orig_frames, :]
+        
+        # Step 1: Find active speakers in the output
+        active_speakers = []
+        for spk in range(num_output_speakers):
+            if np.any(binarized_output[:, spk]):
+                active_speakers.append(spk)
+
+        # Step 2: Match embedding vectors to output speaker labels
+        embedding_to_speaker_map = {} 
+        speaker_to_embedding_map = {}
+
+        # Calculate correlation matrix between cluster-output patterns and original activity
+        similarity_matrix = np.zeros((len(active_speakers), num_embeddings)) # 1,3
+
+        for i, output_spk in enumerate(active_speakers): # shape ; frames, 20
+            output_pattern = binarized_output[:, output_spk]
+
+            for j in range(num_embeddings):
+                # Calculate correlation  coeef. between speaker patterns
+                if np.std(output_pattern) > 0 and np.std(original_activity[:, j]) > 0:
+                    corr = np.corrcoef(output_pattern, original_activity[:, j])[0, 1]
+                    similarity_matrix[i, j] = corr if not np.isnan(corr) else 0
+
+        # For each speaker, find the embedding with highest correlation
+        for i, output_spk in enumerate(active_speakers):
+            # TODO: Handle the embeddings such that the only one predicted embedding should be mapped to the known speakers in the window.
+            # Select 2nd best
+            
+            best_embedding = np.argmax(similarity_matrix[i])
+            # Handling : max one embedding per label in the window
+            similarity_matrix[i] = None 
+
+            # if best_embedding not in seen_embeds:
+            #     best_embedding = np.argmax(similarity_matrix[i])
+            #     similarity_matrix[i] = -1
+                        
+            embedding_to_speaker_map[best_embedding] = f"speaker{output_spk}"
+            speaker_to_embedding_map[f"speaker{output_spk}"] = best_embedding
+
+        # Step 3: Match detected speakers to known speakers
+        speaker_identity_map = {}
+        seen_names = []
+        for speaker_label, embedding_idx in speaker_to_embedding_map.items():
+            detected_embedding = embeddings[embedding_idx]
+
+            # Calculate similarity to each known speaker
+            best_match = None
+            best_similarity = -1
+
+            
+            for name, known_embedding in known_speaker_embeddings.items():
+                # Calculate cosine similarity (1 = identical, -1 = opposite)
+                similarity = 1 - cosine(detected_embedding, known_embedding) # 1-consine_distance = cosine_simialrity
+
+                if similarity > best_similarity and name not in seen_names:
+                    best_similarity = similarity
+                    best_match = name
+                    seen_names.append(name)
+
+            # Map the original speaker label to the identified name
+            speaker_identity_map[speaker_label] = best_match
+            print(speaker_identity_map)
+        # Step 4: Update annotation if provided
+        if annotation is not None:
+            # for segment, track, label in list(annotation.itertracks(yield_label=True)):
+            #     if label in speaker_identity_map:
+                    # Replace generic label with identified speaker name
+            # tracks = annotation.get_tracks(self, Segment)
+            annotation = annotation.rename_labels(speaker_identity_map)
+            
+
+        return annotation
