@@ -580,7 +580,8 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
 
 
 class SpeakerDiarization(base.Pipeline):
-    def __init__(self, config: SpeakerDiarizationConfig | None = None, espnet = False, known_spkr_wavs = None):
+    def __init__(self, config: SpeakerDiarizationConfig | None = None, espnet = False, known_spkr_wavs = None, centroids_update = True):
+        self.centroids_update = centroids_update
         self.known_spkr_wavs_folder = known_spkr_wavs
         if self.known_spkr_wavs_folder is not None:
             import os
@@ -602,6 +603,10 @@ class SpeakerDiarization(base.Pipeline):
             # extract the embeddings
             for name, file_path in self.known_spkr_wavs.items():
                 self.known_spkr_embds[name] = inference(file_path)
+
+            self.referenced_embds = np.concatenate([np.expand_dims(i, axis=0) for i in self.known_spkr_embds.values()], axis=0)
+            self.names_order = [i for i in self.known_spkr_embds.keys()]
+            self.speaker_identity_map = {f'speaker{idx}':name for idx, name in enumerate(self.names_order)}
 
         self._config = SpeakerDiarizationConfig() if config is None else config
 
@@ -670,13 +675,24 @@ class SpeakerDiarization(base.Pipeline):
 
     def reset(self):
         self.set_timestamp_shift(0)
-        self.clustering = OnlineSpeakerClustering(
-            self.config.tau_active,
-            self.config.rho_update,
-            self.config.delta_new,
-            "cosine",
-            self.config.max_speakers,
-        )
+        if self.known_spkr_wavs_folder is not None and self.centroids_update is True:
+            self.clustering = OnlineSpeakerClustering(
+                self.config.tau_active,
+                self.config.rho_update,
+                self.config.delta_new,
+                "cosine",
+                self.config.max_speakers,
+                referenced_embds = self.referenced_embds
+            )
+        else:
+            self.clustering = OnlineSpeakerClustering(
+                self.config.tau_active,
+                self.config.rho_update,
+                self.config.delta_new,
+                "cosine",
+                self.config.max_speakers,
+                referenced_embds = None
+            )
         self.chunk_buffer, self.pred_buffer = [], []
 
     def __call__(
@@ -814,14 +830,17 @@ class SpeakerDiarization(base.Pipeline):
             agg_prediction = self.pred_aggregation(self.pred_buffer)
             clustered_op = agg_prediction.data.copy()
             agg_prediction = self.binarize(agg_prediction)
-
+            # print(self.speaker_identity_map)
+            if self.centroids_update is True and self.known_spkr_wavs_folder is not None:
+                agg_prediction = agg_prediction.rename_labels(self.speaker_identity_map)
+            else:
             # Label assignment 
-            if self.known_spkr_wavs_folder is not None:
-                cnt_labels = agg_prediction.labels()
-                if len(cnt_labels) != 0 and agg_waveform.data.shape[0] != 8000:
-                    agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data, clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
-                elif len(cnt_labels) != 0 and agg_waveform.data.shape[0] == 8000:
-                    agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data[293-clustered_op.shape[0]:,:], clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
+                if self.known_spkr_wavs_folder is not None:
+                    cnt_labels = agg_prediction.labels()
+                    if len(cnt_labels) != 0 and agg_waveform.data.shape[0] != 8000:
+                        agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data, clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
+                    elif len(cnt_labels) != 0 and agg_waveform.data.shape[0] == 8000:
+                        agg_prediction = self.match_and_identify_speakers(embeddings=emb, original_activity=seg.data[293-clustered_op.shape[0]:,:], clustered_output=clustered_op, known_speaker_embeddings= self.known_spkr_embds, annotation=agg_prediction)
 
             # Shift prediction timestamps if required
             if self.timestamp_shift != 0:
@@ -975,7 +994,7 @@ class SpeakerDiarization(base.Pipeline):
 
             # Map the original speaker label to the identified name
             speaker_identity_map[speaker_label] = best_match
-            print(speaker_identity_map)
+            # print(speaker_identity_map)
         # Step 4: Update annotation if provided
         if annotation is not None:
             # for segment, track, label in list(annotation.itertracks(yield_label=True)):
