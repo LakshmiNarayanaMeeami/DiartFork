@@ -3,6 +3,7 @@ from typing import Optional, List, Iterable, Tuple
 import numpy as np
 import torch
 from pyannote.core import SlidingWindowFeature
+from scipy.spatial.distance import cosine
 
 from ..mapping import SpeakerMap, SpeakerMapBuilder
 
@@ -36,7 +37,9 @@ class OnlineSpeakerClustering:
         metric: Optional[str] = "cosine",
         max_speakers: int = 20,
         referenced_embds = None,
+        embds_db = None,
     ):
+        self.embds_db = embds_db
         self.referenced_embds = referenced_embds
         self.tau_active = tau_active
         self.rho_update = rho_update
@@ -114,7 +117,17 @@ class OnlineSpeakerClustering:
                 Index of the created center
         """
         center = self.get_next_center_position()
-        self.centers[center] = embedding
+        # score = []
+        # score = -1
+        """best_match = None
+        for name,emb in self.embds_db.items():
+            similarity = 1 - cosine(embedding, emb)
+            if similarity > score:
+                best_match = name
+                score = similarity
+                print("Similarity: ", score)
+        self.centers[center] = self.embds_db[best_match]
+        del self.embds_db[best_match]"""
         self.active_centers.add(center)
         return center
 

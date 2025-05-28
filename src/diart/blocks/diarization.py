@@ -580,7 +580,8 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
 
 
 class SpeakerDiarization(base.Pipeline):
-    def __init__(self, config: SpeakerDiarizationConfig | None = None, espnet = False, known_spkr_wavs = None, centroids_update = True):
+    def __init__(self, config: SpeakerDiarizationConfig | None = None, espnet = False, known_spkr_wavs = None, centroids_update = True, embds_db = None):
+        self.embds_db = embds_db
         self.centroids_update = centroids_update
         self.known_spkr_wavs_folder = known_spkr_wavs
         if self.known_spkr_wavs_folder is not None:
@@ -683,6 +684,15 @@ class SpeakerDiarization(base.Pipeline):
                 "cosine",
                 self.config.max_speakers,
                 referenced_embds = self.referenced_embds
+            )
+        elif self.known_spkr_wavs_folder is None and self.centroids_update is True:
+            self.clustering = OnlineSpeakerClustering(
+                self.config.tau_active,
+                self.config.rho_update,
+                self.config.delta_new,
+                "cosine",
+                self.config.max_speakers,
+                embds_db = self.embds_db
             )
         else:
             self.clustering = OnlineSpeakerClustering(
@@ -833,6 +843,11 @@ class SpeakerDiarization(base.Pipeline):
             # print(self.speaker_identity_map)
             if self.centroids_update is True and self.known_spkr_wavs_folder is not None:
                 agg_prediction = agg_prediction.rename_labels(self.speaker_identity_map)
+
+            elif self.centroids_update is True and self.known_spkr_wavs_folder is None:
+                # agg_prediction = agg_prediction.rename_labels(self.speaker_identity_map)
+                pass
+            
             else:
             # Label assignment 
                 if self.known_spkr_wavs_folder is not None:
