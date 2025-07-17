@@ -587,8 +587,7 @@ class SpeakerDiarization(base.Pipeline):
             import os
             self.known_spkr_wavs = {}
             from pyannote.audio import Model
-            model = Model.from_pretrained("pyannote/embedding", 
-                              use_auth_token="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")
+            model = Model.from_pretrained("pyannote/embedding")
             from pyannote.audio import Inference
             # DF the uri's and abs path
             inference = Inference(model, window="whole")
