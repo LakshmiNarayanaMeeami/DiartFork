@@ -16,7 +16,7 @@ from .embedding import OverlapAwareSpeakerEmbedding
 from .segmentation import SpeakerSegmentation
 from .utils import Binarize
 from .. import models as m
-
+import torch.nn.functional as F
 
 class SpeakerDiarizationConfig(base.PipelineConfig):
     def __init__(
@@ -35,6 +35,9 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
         normalize_embedding_weights: bool = False,
         device: torch.device | None = None,
         sample_rate: int = 16000,
+        only_probs: bool = False,
+        external_vad = False,
+        vad_model = None,
         **kwargs,
     ):
         # Default segmentation model is pyannote/segmentation
@@ -68,6 +71,9 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+        self.only_probs = only_probs
+        self.external_vad = external_vad
+        self.vad_model = vad_model
 
     @property
     def duration(self) -> float:
@@ -96,6 +102,11 @@ class SpeakerDiarization(base.Pipeline):
         self.segmentation = SpeakerSegmentation(
             self._config.segmentation, self._config.device
         )
+        if self._config.external_vad:
+            self.voice_activity = SpeakerSegmentation(
+            self._config.vad_model, self._config.device
+        ) # return list of probs when called
+
         self.embedding = OverlapAwareSpeakerEmbedding(
             self._config.embedding,
             self._config.gamma,
@@ -103,6 +114,7 @@ class SpeakerDiarization(base.Pipeline):
             norm=1,
             normalize_weights=self._config.normalize_embedding_weights,
             device=self._config.device,
+            only_probs = self._config.only_probs,
         )
         self.pred_aggregation = DelayedAggregation(
             self._config.step,
@@ -184,8 +196,29 @@ class SpeakerDiarization(base.Pipeline):
 
         # Extract segmentation and embeddings
         segmentations = self.segmentation(batch)  # shape (batch, frames, speakers)
-        # embeddings has shape (batch, speakers, emb_dim)
-        embeddings = self.embedding(batch, segmentations)
+        if self._config.external_vad:
+            voice_activity = self.voice_activity(batch) # shape (batch, frames, speakers)
+            voice_detection = (torch.max(voice_activity, dim=-1, keepdim=True)[
+                0
+            ] > self._config.tau_active).float()
+            
+            # Check for the num of frames matched
+            if voice_detection.shape[1] != segmentations.shape[1]:
+                diff = voice_detection.shape[1] - segmentations.shape[1]
+                if diff > 0:
+                    vad_perm = voice_detection.permute(0, 2, 1)  # (1, 1, 293)
+                    # Interpolate to match the second dimension (256)
+                    vad_interp = F.interpolate(vad_perm, size=segmentations.shape[1], mode='linear', align_corners=True)  # (1, 1, 256)
+                    # Permute back to (B, T, C)
+                    voice_detection = vad_interp.permute(0, 2, 1)  # (1, 256, 1)
+                else:
+                    voice_detection = F.pad(voice_detection, (0, 0, 0, -diff))
+    
+            segmentations_with_vad = voice_detection * segmentations
+            # embeddings has shape (batch, speakers, emb_dim)
+            embeddings = self.embedding(batch, segmentations_with_vad)
+        else:
+            embeddings = self.embedding(batch, segmentations)
 
         seg_resolution = waveforms[0].extent.duration / segmentations.shape[1]
 
