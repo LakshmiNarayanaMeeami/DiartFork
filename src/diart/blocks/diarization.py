@@ -508,6 +508,7 @@ from .embedding import OverlapAwareSpeakerEmbedding, EpsnetSpeakerEmbedding
 from .segmentation import SpeakerSegmentation
 from .utils import Binarize
 from .. import models as m
+import torch.nn.functional as F
 
 from scipy.spatial.distance import cosine
 
@@ -528,6 +529,9 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
         normalize_embedding_weights: bool = False,
         device: torch.device | None = None,
         sample_rate: int = 16000,
+        only_probs: bool = False,
+        external_vad = False,
+        vad_model = None,
         **kwargs,
     ):
         # Default segmentation model is pyannote/segmentation
@@ -561,6 +565,9 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+        self.only_probs = only_probs
+        self.external_vad = external_vad
+        self.vad_model = vad_model
 
     @property
     def duration(self) -> float:
@@ -615,6 +622,20 @@ class SpeakerDiarization(base.Pipeline):
 
         self.segmentation = SpeakerSegmentation(
             self._config.segmentation, self._config.device
+        )
+        if self._config.external_vad:
+            self.voice_activity = SpeakerSegmentation(
+            self._config.vad_model, self._config.device
+        ) # return list of probs when called
+
+        self.embedding = OverlapAwareSpeakerEmbedding(
+            self._config.embedding,
+            self._config.gamma,
+            self._config.beta,
+            norm=1,
+            normalize_weights=self._config.normalize_embedding_weights,
+            device=self._config.device,
+            only_probs = self._config.only_probs,
         )
         if espnet:
             self.embedding = EpsnetSpeakerEmbedding(
@@ -734,88 +755,30 @@ class SpeakerDiarization(base.Pipeline):
 
         # Extract segmentation and embeddings
         segmentations = self.segmentation(batch)  # shape (batch, frames, speakers)
-        # embeddings has shape (batch, speakers, emb_dim)
-        embeddings = self.embedding(batch, segmentations)
-        """
-        Edit: Feb 04 2024
-            Preparing emebddings from the wavlm features by summing over the time axis with constratin fo one emebdding per speaker
-            Step. 1: Getting the features of the wavlm along with the segmentations (activity probs.)
-            Ex: segmentations, wavlm_features = self.segmentation(batch)
-            Step. 2: Binarize the segmentations to get the speaker activity
-            Ex: spkr_activity = self.binarize(segmentations<should be sliding window objecet>)
-            instead directly apply brute force binarization
-            Step. 3: Get the speaker based-embeddings from the wavlm features
-            Ex: embeddings = np.sum(wavlm_features * spkr_activity, axis=1)
-        """
-        # segmentations, sincnet_features = self.segmentation(batch) #(batch, frames, speakers), 
-        # spkr_activity = (segmentations>self._config.tau_active).int() # binarize the segmentations (batch, frames, dim)
-        # we should get a single vector from the segmentation 
-        # mask feature frames with no activity and with overlapping speakers
-        # mask the frames with only one speaker exists.
-        # mask = torch.sum(spkr_activity, dim=-1) == 1 #(1, frames)
-        # # mask = mask.int()
-        # print("Mask: ", mask.shape)
-        
-        # masked_spkr_activity = spkr_activity[:, mask.squeeze(0)]  
-        
-        # # select the corresponding wavlm features
-        # batch_size = sincnet_features.shape[0]
-        # feature_dim = sincnet_features.shape[-1]
-        # embeddings = torch.zeros((batch_size, spkr_activity.shape[-1], feature_dim))
-        # sincnet_features = sincnet_features.cpu()
-        # masked_sincnet_features = sincnet_features[:, mask.squeeze(0), :] # (batch, active_frames, dim)
-        # features = masked_sincnet_features.squeeze(0)
-        # activity = masked_spkr_activity.squeeze(0) # (active_frames, num_speakers)
-        # weighted_features = features * activity
-        # embedding = torch.sum(weighted_features, dim=0).unsqueeze(0)
-        # embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
+        if self._config.external_vad:
+            voice_activity = self.voice_activity(batch) # shape (batch, frames, speakers)
+            voice_detection = (torch.max(voice_activity, dim=-1, keepdim=True)[
+                0
+            ] > self._config.tau_active).float()
+            
+            # Check for the num of frames matched
+            if voice_detection.shape[1] != segmentations.shape[1]:
+                diff = voice_detection.shape[1] - segmentations.shape[1]
+                if diff > 0:
+                    vad_perm = voice_detection.permute(0, 2, 1)  # (1, 1, 293)
+                    # Interpolate to match the second dimension (256)
+                    vad_interp = F.interpolate(vad_perm, size=segmentations.shape[1], mode='linear', align_corners=True)  # (1, 1, 256)
+                    # Permute back to (B, T, C)
+                    voice_detection = vad_interp.permute(0, 2, 1)  # (1, 256, 1)
+                else:
+                    voice_detection = F.pad(voice_detection, (0, 0, 0, -diff))
+    
+            segmentations_with_vad = voice_detection * segmentations
+            # embeddings has shape (batch, speakers, emb_dim)
+            embeddings = self.embedding(batch, segmentations_with_vad)
+        else:
+            embeddings = self.embedding(batch, segmentations)
 
-        """again Edited by me"""
-        # mask = torch.sum(spkr_activity, dim=-1) == 1  # shape: (1, frames)
-        # print("Mask: ", mask.shape)
-
-        # # Apply mask to speaker activity: (1, active_frames, num_speakers)
-        # masked_spkr_activity = spkr_activity[:, mask.squeeze(0), :]
-
-        # # Select corresponding sincnet (or wavlm) features: (batch, active_frames, feature_dim)
-        # sincnet_features = sincnet_features.cpu()
-        # masked_sincnet_features = sincnet_features[:, mask.squeeze(0), :]
-
-        # # For simplicity, assuming batch size = 1; remove the batch dimension
-        # features = masked_sincnet_features.squeeze(0)      # (active_frames, feature_dim)
-        # activity = masked_spkr_activity.squeeze(0)           # (active_frames, num_speakers)
-
-        # # To average per speaker:
-        # # Expand dimensions to allow broadcasting:
-        # # features: (active_frames, 1, feature_dim)
-        # # activity:  (active_frames, num_speakers, 1)
-        # features_expanded = features.unsqueeze(1)   # (active_frames, 1, feature_dim)
-        # activity_expanded  = activity.unsqueeze(-1)   # (active_frames, num_speakers, 1)
-
-        # # Weight features by speaker activity. This results in a tensor of shape (active_frames, num_speakers, feature_dim)
-        # weighted_features = features_expanded * activity_expanded
-
-        # # Sum over frames for each speaker
-        # speaker_sum = weighted_features.sum(dim=0)  # (num_speakers, feature_dim)
-
-        # # Count number of frames each speaker is active
-        # speaker_count = activity.sum(dim=0).unsqueeze(-1)  # (num_speakers, 1)
-
-        # # Compute the average feature vector for each speaker.
-        # # (If a speaker was never active, you may need additional handling to avoid division by zero.)
-        # speaker_avg = speaker_sum / speaker_count  # (num_speakers, feature_dim)
-
-        # # Optionally, normalize the embeddings
-        # speaker_avg = torch.nn.functional.normalize(speaker_avg, p=2, dim=-1)
-
-        # # If you need to keep the batch dimension, you can unsqueeze:
-        # embeddings = speaker_avg.unsqueeze(0)  # (1, num_speakers, feature_dim)
-
-        
-        # # embeddings = torch.sum(spkr_activity.T*masked_sincnet_features.squeeze(0), dim=1).unsqueeze(0)
-        # print(embeddings.shape)
-        """End of edit"""
-        
         seg_resolution = waveforms[0].extent.duration / segmentations.shape[1]
         outputs = []
         for wav, seg, emb in zip(waveforms, segmentations, embeddings):

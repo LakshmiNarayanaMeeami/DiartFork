@@ -4,11 +4,14 @@ import torch
 
 
 def overlapped_speech_penalty(
-    segmentation: torch.Tensor, gamma: float = 3, beta: float = 10
+    segmentation: torch.Tensor, gamma: float = 3, beta: float = 10, only_probs: bool = False
 ):
     # segmentation has shape (batch, frames, speakers)
     probs = torch.softmax(beta * segmentation, dim=-1)
-    weights = torch.pow(segmentation, gamma) * torch.pow(probs, gamma)
+    if not only_probs:
+        weights = torch.pow(segmentation, gamma) * torch.pow(probs, gamma)
+    else:
+        weights = probs
     weights[weights < 1e-8] = 1e-8
     return weights
 

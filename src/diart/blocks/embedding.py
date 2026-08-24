@@ -546,16 +546,20 @@ class OverlappedSpeechPenalty:
         Defaults to False.
     """
 
-    def __init__(self, gamma: float = 3, beta: float = 10, normalize: bool = False):
+    def __init__(self, gamma: float = 3, beta: float = 10, normalize: bool = False, only_probs: bool = False):
         self.gamma = gamma
         self.beta = beta
         self.formatter = TemporalFeatureFormatter()
         self.normalize = normalize
+        self.only_probs = only_probs
 
     def __call__(self, segmentation: TemporalFeatures) -> TemporalFeatures:
         weights = self.formatter.cast(segmentation)  # shape (batch, frames, speakers)
         with torch.inference_mode():
-            weights = F.overlapped_speech_penalty(weights, self.gamma, self.beta)
+            if not self.only_probs:
+                weights = F.overlapped_speech_penalty(weights, self.gamma, self.beta)
+            else:
+                weights = F.overlapped_speech_penalty(weights, 1, 1)
             if self.normalize:
                 min_values = weights.min(dim=1, keepdim=True).values
                 max_values = weights.max(dim=1, keepdim=True).values
@@ -609,9 +613,10 @@ class OverlapAwareSpeakerEmbedding:
         norm: Union[float, torch.Tensor] = 1,
         normalize_weights: bool = False,
         device: Optional[torch.device] = None,
+        only_probs: bool = False,
     ):
         self.embedding = SpeakerEmbedding(model, device)
-        self.osp = OverlappedSpeechPenalty(gamma, beta, normalize_weights)
+        self.osp = OverlappedSpeechPenalty(gamma, beta, normalize_weights, only_probs)
         self.normalize = EmbeddingNormalization(norm)
 
     @staticmethod
