@@ -35,7 +35,9 @@ class OnlineSpeakerClustering:
         delta_new: float,
         metric: Optional[str] = "cosine",
         max_speakers: int = 20,
+        referenced_embds = None,
     ):
+        self.referenced_embds = referenced_embds
         self.tau_active = tau_active
         self.rho_update = rho_update
         self.delta_new = delta_new
@@ -147,15 +149,28 @@ class OnlineSpeakerClustering:
         num_local_speakers = segmentation.data.shape[1]
 
         if self.centers is None:
-            self.init_centers(embeddings.shape[1])
-            assignments = [
-                (spk, self.add_center(embeddings[spk])) for spk in active_speakers
-            ]
-            return SpeakerMapBuilder.hard_map(
-                shape=(num_local_speakers, self.max_speakers),
-                assignments=assignments,
-                maximize=False,
-            )
+            if self.referenced_embds is not None:
+                self.init_centers(embeddings.shape[1])
+                # self.centers[:self.referenced_embds.shape[0]] = self.referenced_embds
+                assignments = [
+                    (spk, self.add_center(self.referenced_embds[spk])) for spk in range(self.referenced_embds.shape[0])
+                ]
+                
+                # return SpeakerMapBuilder.hard_map(
+                #     shape=(self.referenced_embds.shape[0], self.max_speakers),
+                #     assignments=assignments,
+                #     maximize=False,
+                # )
+            else:
+                self.init_centers(embeddings.shape[1])
+                assignments = [
+                    (spk, self.add_center(embeddings[spk])) for spk in active_speakers
+                ]
+                return SpeakerMapBuilder.hard_map(
+                    shape=(num_local_speakers, self.max_speakers),
+                    assignments=assignments,
+                    maximize=False,
+                )
 
         # Obtain a mapping based on distances between embeddings and centers
         dist_map = SpeakerMapBuilder.dist(embeddings, self.centers, self.metric)
