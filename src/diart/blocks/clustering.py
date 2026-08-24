@@ -3,6 +3,7 @@ from typing import Optional, List, Iterable, Tuple
 import numpy as np
 import torch
 from pyannote.core import SlidingWindowFeature
+from scipy.spatial.distance import cosine
 
 from ..mapping import SpeakerMap, SpeakerMapBuilder
 
@@ -35,7 +36,11 @@ class OnlineSpeakerClustering:
         delta_new: float,
         metric: Optional[str] = "cosine",
         max_speakers: int = 20,
+        referenced_embds = None,
+        embds_db = None,
     ):
+        self.embds_db = embds_db
+        self.referenced_embds = referenced_embds
         self.tau_active = tau_active
         self.rho_update = rho_update
         self.delta_new = delta_new
@@ -112,7 +117,17 @@ class OnlineSpeakerClustering:
                 Index of the created center
         """
         center = self.get_next_center_position()
-        self.centers[center] = embedding
+        # score = []
+        # score = -1
+        """best_match = None
+        for name,emb in self.embds_db.items():
+            similarity = 1 - cosine(embedding, emb)
+            if similarity > score:
+                best_match = name
+                score = similarity
+                print("Similarity: ", score)
+        self.centers[center] = self.embds_db[best_match]
+        del self.embds_db[best_match]"""
         self.active_centers.add(center)
         return center
 
@@ -147,15 +162,28 @@ class OnlineSpeakerClustering:
         num_local_speakers = segmentation.data.shape[1]
 
         if self.centers is None:
-            self.init_centers(embeddings.shape[1])
-            assignments = [
-                (spk, self.add_center(embeddings[spk])) for spk in active_speakers
-            ]
-            return SpeakerMapBuilder.hard_map(
-                shape=(num_local_speakers, self.max_speakers),
-                assignments=assignments,
-                maximize=False,
-            )
+            if self.referenced_embds is not None:
+                self.init_centers(embeddings.shape[1])
+                # self.centers[:self.referenced_embds.shape[0]] = self.referenced_embds
+                assignments = [
+                    (spk, self.add_center(self.referenced_embds[spk])) for spk in range(self.referenced_embds.shape[0])
+                ]
+                
+                # return SpeakerMapBuilder.hard_map(
+                #     shape=(self.referenced_embds.shape[0], self.max_speakers),
+                #     assignments=assignments,
+                #     maximize=False,
+                # )
+            else:
+                self.init_centers(embeddings.shape[1])
+                assignments = [
+                    (spk, self.add_center(embeddings[spk])) for spk in active_speakers
+                ]
+                return SpeakerMapBuilder.hard_map(
+                    shape=(num_local_speakers, self.max_speakers),
+                    assignments=assignments,
+                    maximize=False,
+                )
 
         # Obtain a mapping based on distances between embeddings and centers
         dist_map = SpeakerMapBuilder.dist(embeddings, self.centers, self.metric)
